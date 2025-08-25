@@ -2,20 +2,18 @@
 set -euo pipefail
 source config.sh
 
-# Cores
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+# ----------------- Cores -----------------
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-mkdir -p "$WORK" "$LOGS" "$REPO" "$INSTALL"
-touch "$DB"
-
-# Spinner simples
+# ----------------- Spinner -----------------
 spinner() {
     local pid=$1
     local delay=0.1
     local spinstr='|/-\'
     while kill -0 "$pid" 2>/dev/null; do
         local temp=${spinstr#?}
-        printf " [%c] \r" "$spinstr"
+        printf " ${CYAN}[%c]${NC} \r" "$spinstr"
         spinstr=$temp${spinstr%"$temp"}
         sleep $delay
     done
@@ -31,20 +29,20 @@ run_logged() {
     local pid=$!
     spinner $pid "$log_file"
     wait $pid
-    echo -e "${GREEN}OK${NC} ($desc)"
-}
-
-# Sincroniza repo git
-sync_repo() {
-    if [ ! -d "$REPO/.git" ]; then
-        git clone <URL_DO_SEU_REPO> "$REPO"
+    local status=$?
+    if [ $status -eq 0 ]; then
+        echo -e "${GREEN}OK${NC} ($desc)"
     else
-        git -C "$REPO" fetch --all
-        git -C "$REPO" reset --hard origin/main
+        echo -e "${RED}FALHA${NC} ($desc) - Veja log: $log_file"
+        exit 1
     fi
 }
 
-# Registro de pacotes
+# ----------------- Diretórios -----------------
+mkdir -p "$WORK" "$LOGS" "$REPO" "$INSTALL"
+touch "$DB"
+
+# ----------------- Funções de registro -----------------
 register_package() {
     local name=$1
     local version=$2
@@ -80,10 +78,22 @@ remove_package() {
         rm -rf "$INSTALL/$f"
     done
     unregister_package "$name"
-    echo "Pacote $name removido."
+    echo -e "${YELLOW}Pacote $name removido.${NC}"
 }
 
-# Verifica argumentos
+# ----------------- Sincronização do repo -----------------
+sync_repo() {
+    if [ ! -d "$REPO/.git" ]; then
+        echo -e "${BLUE}Clonando repositório...${NC}"
+        git clone <URL_DO_SEU_REPO> "$REPO"
+    else
+        echo -e "${BLUE}Atualizando repositório...${NC}"
+        git -C "$REPO" fetch --all
+        git -C "$REPO" reset --hard origin/main
+    fi
+}
+
+# ----------------- Validação de argumentos -----------------
 if [ $# -lt 2 ]; then
     echo -e "${RED}Uso: $0 <recipe> <fase|all|sync|remove|search|info>${NC}"
     exit 1
@@ -100,20 +110,19 @@ if [ "$PHASE" != "sync" ] && [ "$PHASE" != "remove" ] && [ "$PHASE" != "search" 
     source "recipes/$RECIPE"
 fi
 
-# Diretórios automáticos
 SRC_DIR="$WORK/$NAME-$VERSION"
 DESTDIR="$INSTALL/$NAME-$VERSION"
 
-# Funções padrão do framework
+# ----------------- Funções padrão -----------------
 default_fetch() {
     mkdir -p "$WORK"
     for url in "${SRC_URLS[@]}"; do
         if curl -L --fail -o "$WORK/$(basename $url)" "$url"; then
-            echo "Download bem-sucedido: $url"
+            echo -e "${GREEN}Download bem-sucedido: $url${NC}"
             return
         fi
     done
-    echo "Falha em todos os downloads!"
+    echo -e "${RED}Falha em todos os downloads!${NC}"
     exit 1
 }
 
@@ -125,8 +134,9 @@ default_extract() {
         *.tar.bz2) tar -xjf "$WORK/$archive" -C "$SRC_DIR" --strip-components=1 ;;
         *.tar.xz) tar -xJf "$WORK/$archive" -C "$SRC_DIR" --strip-components=1 ;;
         *.zip) unzip "$WORK/$archive" -d "$SRC_DIR" ;;
-        *) echo "Formato desconhecido!" ; exit 1 ;;
+        *) echo -e "${RED}Formato desconhecido!${NC}" ; exit 1 ;;
     esac
+    echo -e "${GREEN}Extração concluída.${NC}"
 }
 
 default_patch() {
@@ -134,7 +144,7 @@ default_patch() {
     [ -d "$patch_dir" ] || return
     cd "$SRC_DIR"
     for p in $(ls "$patch_dir"/*.patch 2>/dev/null | sort); do
-        echo "Aplicando patch $p"
+        echo -e "${YELLOW}Aplicando patch $p${NC}"
         patch -p1 < "$p"
     done
 }
@@ -145,6 +155,7 @@ default_build() {
     ../configure --prefix=/usr &> "$LOGS/${NAME}_configure.log"
     make -j"$PARALLEL" &> "$LOGS/${NAME}_make.log"
     if make -q check 2>/dev/null; then
+        echo -e "${YELLOW}Executando testes...${NC}"
         make -k check -j"$PARALLEL" &> "$LOGS/${NAME}_test.log"
     fi
     if [ "$USE_FAKEROOT" -eq 1 ]; then
@@ -160,7 +171,7 @@ default_package() {
     echo -e "${GREEN}Pacote $NAME gerado: $WORK/${NAME}-${VERSION}.tar.gz${NC}"
 }
 
-# Executa fase
+# ----------------- Execução das fases -----------------
 case "$PHASE" in
     sync) sync_repo ;;
     fetch) run_logged "fetch $NAME" "${fetch:-default_fetch}" ;;
