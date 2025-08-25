@@ -8,9 +8,9 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 mkdir -p "$WORK" "$LOGS" "$REPO" "$INSTALL"
 touch "$DB"
 
+# Spinner simples
 spinner() {
     local pid=$1
-    local log_file=$2
     local delay=0.1
     local spinstr='|/-\'
     while kill -0 "$pid" 2>/dev/null; do
@@ -34,17 +34,17 @@ run_logged() {
     echo -e "${GREEN}OK${NC} ($desc)"
 }
 
+# Sincroniza repo git
 sync_repo() {
     if [ ! -d "$REPO/.git" ]; then
-        echo -e "${YELLOW}Clonando repo em $REPO${NC}"
         git clone <URL_DO_SEU_REPO> "$REPO"
     else
-        echo -e "${YELLOW}Atualizando repo em $REPO${NC}"
         git -C "$REPO" fetch --all
         git -C "$REPO" reset --hard origin/main
     fi
 }
 
+# Registro de pacotes
 register_package() {
     local name=$1
     local version=$2
@@ -58,11 +58,7 @@ unregister_package() {
 }
 
 list_installed() {
-    if [ ! -s "$DB" ]; then
-        echo "Nenhum pacote instalado."
-    else
-        cat "$DB"
-    fi
+    [ -s "$DB" ] && cat "$DB" || echo "Nenhum pacote instalado."
 }
 
 search_package() {
@@ -78,10 +74,7 @@ info_package() {
 remove_package() {
     local name=$1
     local line=$(grep "^$name|" "$DB" || true)
-    if [ -z "$line" ]; then
-        echo "Pacote não instalado."
-        return
-    fi
+    [ -z "$line" ] && { echo "Pacote não instalado."; return; }
     local files=$(echo "$line" | cut -d'|' -f4)
     for f in $files; do
         rm -rf "$INSTALL/$f"
@@ -107,14 +100,81 @@ if [ "$PHASE" != "sync" ] && [ "$PHASE" != "remove" ] && [ "$PHASE" != "search" 
     source "recipes/$RECIPE"
 fi
 
+# Diretórios automáticos
+SRC_DIR="$WORK/$NAME-$VERSION"
+DESTDIR="$INSTALL/$NAME-$VERSION"
+
+# Funções padrão do framework
+default_fetch() {
+    mkdir -p "$WORK"
+    for url in "${SRC_URLS[@]}"; do
+        if curl -L --fail -o "$WORK/$(basename $url)" "$url"; then
+            echo "Download bem-sucedido: $url"
+            return
+        fi
+    done
+    echo "Falha em todos os downloads!"
+    exit 1
+}
+
+default_extract() {
+    mkdir -p "$SRC_DIR"
+    local archive=$(ls "$WORK" | grep "$NAME" | head -n1)
+    case "$archive" in
+        *.tar.gz) tar -xzf "$WORK/$archive" -C "$SRC_DIR" --strip-components=1 ;;
+        *.tar.bz2) tar -xjf "$WORK/$archive" -C "$SRC_DIR" --strip-components=1 ;;
+        *.tar.xz) tar -xJf "$WORK/$archive" -C "$SRC_DIR" --strip-components=1 ;;
+        *.zip) unzip "$WORK/$archive" -d "$SRC_DIR" ;;
+        *) echo "Formato desconhecido!" ; exit 1 ;;
+    esac
+}
+
+default_patch() {
+    local patch_dir="$REPO/base/$NAME/patch"
+    [ -d "$patch_dir" ] || return
+    cd "$SRC_DIR"
+    for p in $(ls "$patch_dir"/*.patch 2>/dev/null | sort); do
+        echo "Aplicando patch $p"
+        patch -p1 < "$p"
+    done
+}
+
+default_build() {
+    cd "$SRC_DIR"
+    mkdir -p build && cd build
+    ../configure --prefix=/usr &> "$LOGS/${NAME}_configure.log"
+    make -j"$PARALLEL" &> "$LOGS/${NAME}_make.log"
+    if make -q check 2>/dev/null; then
+        make -k check -j"$PARALLEL" &> "$LOGS/${NAME}_test.log"
+    fi
+    if [ "$USE_FAKEROOT" -eq 1 ]; then
+        fakeroot make DESTDIR="$DESTDIR" install &> "$LOGS/${NAME}_install.log"
+    else
+        make DESTDIR="$DESTDIR" install &> "$LOGS/${NAME}_install.log"
+    fi
+}
+
+default_package() {
+    tar -czf "$WORK/${NAME}-${VERSION}.tar.gz" -C "$DESTDIR" .
+    register_package "$NAME" "$VERSION" "$NAME-$VERSION"
+    echo -e "${GREEN}Pacote $NAME gerado: $WORK/${NAME}-${VERSION}.tar.gz${NC}"
+}
+
+# Executa fase
 case "$PHASE" in
     sync) sync_repo ;;
-    fetch) fetch ;;
-    extract) extract ;;
-    patch) patch_sources ;;
-    build) build ;;
-    package) package ;;
-    all) fetch; extract; patch_sources; build; package ;;
+    fetch) run_logged "fetch $NAME" "${fetch:-default_fetch}" ;;
+    extract) run_logged "extract $NAME" "${extract:-default_extract}" ;;
+    patch) run_logged "patch $NAME" "${patch_sources:-default_patch}" ;;
+    build) run_logged "build $NAME" "${build:-default_build}" ;;
+    package) run_logged "package $NAME" "${package:-default_package}" ;;
+    all)
+        run_logged "fetch $NAME" "${fetch:-default_fetch}"
+        run_logged "extract $NAME" "${extract:-default_extract}"
+        run_logged "patch $NAME" "${patch_sources:-default_patch}"
+        run_logged "build $NAME" "${build:-default_build}"
+        run_logged "package $NAME" "${package:-default_package}"
+        ;;
     remove) remove_package "$RECIPE" ;;
     search) search_package "$RECIPE" ;;
     info) info_package "$RECIPE" ;;
