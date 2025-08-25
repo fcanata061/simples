@@ -1,0 +1,135 @@
+====================================================================
+TUTORIAL COMPLETO: GERENCIADOR SOURCE-BASED ULTRA-SIMPLIFICADO
+====================================================================
+
+1. ESTRUTURA DE DIRETÓRIOS
+--------------------------
+Crie a seguinte estrutura dentro de um diretório base (ex: `source-manager/`):
+
+source-manager/
+├── build.sh            # script principal do framework
+├── config.sh           # arquivo de configuração
+├── packages.db         # banco de pacotes instalados
+├── recipes/            # diretório de recipes
+│   └── gcc.sh          # exemplo de recipe do GCC
+├── work/               # diretório temporário de build
+├── logs/               # logs detalhados de cada fase
+├── repo/               # repositório git do projeto e patches
+│   └── base/
+│       └── gcc/
+│           └── patch/ # arquivos .patch automáticos
+├── install/            # DESTDIR temporário para instalação
+
+2. CONFIGURAÇÃO DAS VARIÁVEIS (config.sh)
+-----------------------------------------
+#!/bin/bash
+
+WORK="${WORK:-$PWD/work}"            # diretório temporário de build
+LOGS="${LOGS:-$PWD/logs}"            # diretório de logs
+REPO="${REPO:-$PWD/repo}"            # diretório do repositório git
+INSTALL="${INSTALL:-$PWD/install}"    # DESTDIR para instalação temporária
+DB="${DB:-$PWD/packages.db}"         # banco de pacotes instalados
+PARALLEL=${PARALLEL:-$(nproc)}       # número de jobs paralelos
+USE_FAKEROOT=${USE_FAKEROOT:-0}      # 0 = não usar fakeroot, 1 = usar
+
+3. COMANDOS DO FRAMEWORK (build.sh)
+-----------------------------------
+Uso geral:
+
+./build.sh <recipe> <fase|all>
+
+Fases disponíveis:
+
+- sync     : sincroniza o repositório git
+- fetch    : baixa o source do pacote
+- extract  : extrai automaticamente qualquer formato (.tar.gz, .tar.bz2, .tar.xz, .zip)
+- patch    : aplica todos os patches automáticos de /repo/base/<NAME>/patch/
+- build    : compila usando padrão genérico (configure && make)
+- package  : instala em DESTDIR, empacota em tar.gz e registra no banco
+- all      : executa fetch, extract, patch, build e package automaticamente
+- remove   : remove o pacote usando o registro no banco
+- search   : procura recipe pelo nome
+- info     : exibe informações do pacote instalado
+
+Exemplo de uso:
+
+# Sincroniza repositório
+./build.sh gcc sync
+
+# Executa todo o build e empacotamento
+./build.sh gcc all
+
+# Remove o pacote
+./build.sh gcc remove
+
+# Pesquisa recipe
+./build.sh gcc search
+
+# Exibe informações do pacote instalado
+./build.sh gcc info
+
+4. RECIPE EXEMPLO DO GCC (recipes/gcc.sh)
+-----------------------------------------
+#!/bin/bash
+
+NAME="gcc"
+VERSION="12.2.0"
+SRC_URLS=("https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.gz")
+
+# Nenhuma função é necessária. O framework fará:
+# 1. Download do source
+# 2. Extração automática
+# 3. Aplicação de patches de /repo/base/gcc/patch/
+# 4. Build padrão:
+#       mkdir -p build && cd build
+#       ../configure --prefix=/usr --enable-languages=c,c++ --disable-multilib
+#       make -j$PARALLEL
+# 5. Teste automático: make -k check -j$PARALLEL
+# 6. Instalação em DESTDIR (com fakeroot se USE_FAKEROOT=1)
+# 7. Empacotamento automático: tar -czf WORK/gcc-12.2.0.tar.gz -C DESTDIR .
+# 8. Registro automático no packages.db
+
+5. PATCH AUTOMÁTICO
+------------------
+Para aplicar patches automáticos, crie arquivos .patch em:
+
+repo/base/<NAME>/patch/
+
+Exemplo:
+repo/base/gcc/patch/fix-warning.patch
+repo/base/gcc/patch/adjust-config.patch
+
+O framework detecta e aplica todos automaticamente, sem necessidade de declarar nada na recipe.
+
+6. VARIÁVEIS AUTOMÁTICAS USADAS PELO FRAMEWORK
+---------------------------------------------
+- $WORK    : diretório temporário de build
+- $LOGS    : diretório de logs de cada fase
+- $REPO    : diretório do repositório git e patches
+- $SRC_DIR : diretório do source do pacote ($WORK/$NAME-$VERSION)
+- $INSTALL : diretório de instalação temporária
+- $DESTDIR : diretório final de instalação do pacote ($INSTALL/$NAME-$VERSION)
+- $PARALLEL: número de jobs paralelos para make
+- $USE_FAKEROOT: controla se make DESTDIR é executado com fakeroot
+
+7. FLUXO DE EXECUÇÃO AUTOMÁTICO
+--------------------------------
+1. ./build.sh gcc all
+2. Framework cria WORK, LOGS e INSTALL se não existirem
+3. Baixa o source do GCC
+4. Extrai automaticamente
+5. Aplica patches encontrados em repo/base/gcc/patch/
+6. Compila:
+   mkdir -p build && cd build
+   ../configure --prefix=/usr --enable-languages=c,c++ --disable-multilib
+   make -j$PARALLEL
+7. Testa:
+   make -k check -j$PARALLEL
+8. Instala em DESTDIR, usando fakeroot se configurado
+9. Empacota automaticamente em tar.gz dentro de WORK
+10. Registra pacote em packages.db
+11. Logs detalhados em logs/
+
+====================================================================
+FIM DO TUTORIAL
+====================================================================
