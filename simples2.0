@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# Configurações
+# =========================
+REPO_DIR="${REPO_DIR:-$PWD/repo/base}"
+PKG_DB="${PKG_DB:-$PWD/pkg_db}"
+WORK_DIR="${WORK_DIR:-$PWD/work}"
+BUILD_LOGS="${BUILD_LOGS:-$PWD/logs}"
+DESTDIR="${DESTDIR:-$PWD/destdir}"
+PARALLEL="${PARALLEL:-$(nproc)}"
+
+mkdir -p "$REPO_DIR" "$PKG_DB" "$WORK_DIR" "$BUILD_LOGS" "$DESTDIR"
+
+# Cores
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+CYAN="\033[0;36m"
+RED="\033[0;31m"
+NC="\033[0m"
+
+# =========================
+# Funções auxiliares
+# =========================
+is_installed() { [[ -d "$PKG_DB/$1" || -L "$PKG_DB/$1" ]]; }
+
+add_required_by() {
+    local dep="$1" parent="$2"
+    dep_dir=$(readlink -f "$PKG_DB/$dep" || true)
+    [[ -f "$dep_dir/required_by" ]] || touch "$dep_dir/required_by"
+    grep -qx "$parent" "$dep_dir/required_by" || echo "$parent" >> "$dep_dir/required_by"
+}
+
+resolve_deps() {
+    local dep="$1"
+    [[ $dep == "" ]] && return
+    if ! is_installed "$dep"; then
+        echo -e "${YELLOW}>>> Instalando dependência: $dep${NC}"
+        pkgmgr.sh install "$dep"
+    else
+        echo -e "${GREEN}[OK]${NC} Dependência $dep já instalada"
+    fi
+}
+
+register_package() {
+    local name="$1" version="$2" deps=("${@:3}")
+    local pkg_dir="$PKG_DB/$name-$version"
+    mkdir -p "$pkg_dir"
+    printf "%s\n" "${deps[@]:-}" > "$pkg_dir/required_deps"
+    touch "$pkg_dir/required_by"
+    ln -sfn "$pkg_dir" "$PKG_DB/$name"
+}
+
+# =========================
+# Comando: install
+# =========================
+install_pkg() {
+    local pkg="$1"
+    local recipe="$REPO_DIR/$pkg/recipe.sh"
+
+    if [[ ! -f "$recipe" ]]; then
+        echo -e "${RED}[ERRO]${NC} Receita não encontrada: $pkg"
+        exit 1
+    fi
+
+    source "$recipe"
+
+    # Resolver dependências
+    for dep in "${DEPS[@]:-}"; do
+        resolve_deps "$dep"
+    done
+
+    if is_installed "$NAME"; then
+        echo -e "${GREEN}[SKIP]${NC} $NAME-$VERSION já instalado"
+        return
+    fi
+
+    echo -e "${CYAN}>>> Construindo $NAME-$VERSION...${NC}"
+
+    SRC_DIR="$WORK_DIR/$NAME-$VERSION"
+    LOG_FILE="$BUILD_LOGS/$NAME-$VERSION.log"
+    mkdir -p "$SRC_DIR"
+    cd "$WORK_DIR"
+
+    # Download
+    if [[ "$SOURCE" == git+* ]]; then
+        git clone "${SOURCE#git+}" "$SRC_DIR" >>"$LOG_FILE" 2>&1
+    else
+        curl -L "$SOURCE" -o source.tar >>"$LOG_FILE" 2>&1
+        tar xf source.tar -C "$WORK_DIR"
+        rm -f source.tar
+    fi
+
+    # Patch automático
+    PATCH_DIR="$REPO_DIR/$pkg/patch"
+    if [[ -d "$PATCH_DIR" ]]; then
+        for p in "$PATCH_DIR"/*.patch; do
+            [[ -e "$p" ]] || continue
+            echo -e "${CYAN}[PATCH]${NC} Aplicando $p"
+            patch -d "$SRC_DIR" -p1 < "$p" >>"$LOG_FILE" 2>&1
+        done
+    fi
+
+    # Build
+    cd "$SRC_DIR"
+    if declare -f build &>/dev/null; then
+        build
+    else
+        ./configure --prefix=/usr >>"$LOG_FILE" 2>&1
+        make -j"$PARALLEL" >>"$LOG_FILE" 2>&1
+        make DESTDIR="$DESTDIR" install >>"$LOG_FILE" 2>&1
+    fi
+
+    # Registrar
+    register_package "$NAME" "$VERSION" "${DEPS[@]:-}"
+    for dep in "${DEPS[@]:-}"; do
+        add_required_by "$dep-$VERSION" "$NAME"
+    done
+    find "$DESTDIR" -type f -o -type l > "$PKG_DB/$NAME-$VERSION/installed_files"
+
+    echo -e "${GREEN}[OK]${NC} $NAME-$VERSION instalado"
+}
+
+# =========================
+# Comando: remove
+# =========================
+remove_pkg() {
+    local pkg="$1"
+    pkg_dir=$(readlink -f "$PKG_DB/$pkg")
+
+    if [[ ! -d "$pkg_dir" ]]; then
+        echo -e "${RED}[ERRO]${NC} Pacote $pkg não instalado"
+        exit 1
+    fi
+
+    if [[ -s "$pkg_dir/required_by" ]]; then
+        echo -e "${RED}[BLOQUEADO]${NC} Pacote requerido por:"
+        cat "$pkg_dir/required_by"
+        exit 1
+    fi
+
+    echo -e "${YELLOW}>>> Removendo $pkg...${NC}"
+    if [[ -f "$pkg_dir/installed_files" ]]; then
+        while IFS= read -r f; do
+            rm -rf "$DESTDIR/$f"
+            echo -e "${CYAN}[DEL]${NC} $f"
+        done < "$pkg_dir/installed_files"
+    fi
+
+    if [[ -f "$pkg_dir/required_deps" ]]; then
+        for dep in $(cat "$pkg_dir/required_deps"); do
+            dep_dir=$(readlink -f "$PKG_DB/$dep" || true)
+            sed -i "/^$pkg$/d" "$dep_dir/required_by" 2>/dev/null || true
+        done
+    fi
+
+    rm -rf "$pkg_dir"
+    rm -f "$PKG_DB/$pkg"
+    echo -e "${GREEN}[OK]${NC} Pacote $pkg removido"
+}
+
+# =========================
+# Comando: search
+# =========================
+search_pkg() {
+    local term="$1"
+    echo -e "${CYAN}>>> Buscando '$term'...${NC}"
+
+    echo -e "\n${GREEN}Pacotes disponíveis:${NC}"
+    grep -iRl "$term" "$REPO_DIR" --include recipe.sh | sed "s|$REPO_DIR/||;s|/recipe.sh||" || true
+
+    echo -e "\n${GREEN}Pacotes instalados:${NC}"
+    ls "$PKG_DB" 2>/dev/null | grep -i "$term" || true
+}
+
+# =========================
+# Comando: info
+# =========================
+info_pkg() {
+    local pkg="$1"
+    pkg_dir=$(readlink -f "$PKG_DB/$pkg")
+
+    if [[ ! -d "$pkg_dir" ]]; then
+        echo -e "${RED}[ERRO]${NC} Pacote $pkg não instalado"
+        exit 1
+    fi
+
+    echo -e "${CYAN}>>> Info: $pkg${NC}\n"
+    echo -e "${GREEN}Dependências:${NC}"
+    cat "$pkg_dir/required_deps" 2>/dev/null || echo "(nenhuma)"
+    echo -e "\n${YELLOW}Requerido por:${NC}"
+    cat "$pkg_dir/required_by" 2>/dev/null || echo "(nenhum)"
+    echo -e "\n${CYAN}Arquivos instalados:${NC}"
+    head -n 20 "$pkg_dir/installed_files" 2>/dev/null || echo "(nenhum)"
+}
+
+# =========================
+# Dispatcher
+# =========================
+CMD="${1:-}"
+shift || true
+case "$CMD" in
+    install) install_pkg "$@" ;;
+    remove) remove_pkg "$@" ;;
+    search) search_pkg "$@" ;;
+    info) info_pkg "$@" ;;
+    *)
+        echo -e "${RED}Comando inválido.${NC} Use: install|remove|search|info <pacote>"
+        exit 1
+        ;;
+esac
